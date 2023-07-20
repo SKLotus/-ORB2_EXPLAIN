@@ -276,7 +276,9 @@ cv::Mat System::TrackMonocular(const cv::Mat &im, const double &timestamp)//调�
 
     // Check mode change
     {
+		// 独占锁，主要是为了mbActivateLocalizationMode和mbDeactivateLocalizationMode不会发生混乱
         unique_lock<mutex> lock(mMutexMode);
+		// mbActivateLocalizationMode为true会关闭局部地图线程
         if(mbActivateLocalizationMode)
         {
             mpLocalMapper->RequestStop();
@@ -286,10 +288,13 @@ cv::Mat System::TrackMonocular(const cv::Mat &im, const double &timestamp)//调�
             {
                 usleep(1000);
             }
-
+			// 局部地图关闭以后，只进行追踪的线程，只计算相机的位姿，没有对局部地图进行更新
+		    // 设置mbOnlyTracking为真
             mpTracker->InformOnlyTracking(true);
+			//关闭线程可以使别的线程拿到更多资源
             mbActivateLocalizationMode = false;
         }
+		// 如果mbDeactivateLocalizationMode是true，局部地图线程就被释放, 关键帧从局部地图中删除.
         if(mbDeactivateLocalizationMode)
         {
             mpTracker->InformOnlyTracking(false);
@@ -307,8 +312,8 @@ cv::Mat System::TrackMonocular(const cv::Mat &im, const double &timestamp)//调�
         mbReset = false;
     }
     }
-
-    cv::Mat Tcw = mpTracker->GrabImageMonocular(im,timestamp);
+	//获取相机位姿的估计结果
+    cv::Mat Tcw = mpTracker->GrabImageMonocular(im,timestamp);//此处调用了灰度图处理程序
 
     unique_lock<mutex> lock2(mMutexState);
     mTrackingState = mpTracker->mState;
@@ -317,6 +322,21 @@ cv::Mat System::TrackMonocular(const cv::Mat &im, const double &timestamp)//调�
 
     return Tcw;
 }
+
+/*
+	1、判断传感器的类型是否为单目模式，如果不是，则表示设置错误，函数直接返回
+
+	2、上锁 模式锁(mMutexMode):
+		(1)如果目前需要激活定位模式，则请求停止局部建图，并且等待局部建图线程停止，设置为仅追踪模式。
+		(2)如果目前需要取消定位模式，则通知局部建图可以工作了，关闭仅追踪模式
+
+	3、上锁 复位锁(mMutexReset): 检查是否存在复位请求，如果有，则进行复位操作
+
+	4、核心部分: 根据输入的图像获得相机位姿态（其中包含了特征提取匹配，地图初始化，关键帧查询等操作）
+
+	5、进行数据更新，如追踪状态、当前帧的地图点、当前帧矫正之后的关键点等。
+
+*/
 
 void System::ActivateLocalizationMode()//激活纯定位模式
 {
